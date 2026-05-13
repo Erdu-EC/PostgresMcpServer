@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
-  "description": "<your description here>",
+  "description": "An MCP server for Postgres SQL.",
   "name": "io.github.Erdu-EC/PostgresMcpServer",
-  "version": "0.1.0-beta",
+  "version": "1.0.0",
   "packages": [
     {
       "registryType": "nuget",
