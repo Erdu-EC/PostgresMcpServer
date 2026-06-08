@@ -629,84 +629,90 @@ public sealed class PostgresService : IDisposable
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand(query, conn);
 
-        var sb = new StringBuilder();
-        NpgsqlDataReader? reader = null;
-
         try
         {
-            reader = await cmd.ExecuteReaderAsync(CommandBehavior.Default, ct);
+            var sb = await FormatResults(cmd, maxRows, ct);
+            return sb.ToString();
         }
         catch (Exception ex)
         {
             return $"ERROR: {ex.Message}";
         }
-
-        await using (reader)
-        {
-            if (!reader.HasRows && reader.FieldCount == 0)
-                return "(query executed successfully, no results returned)";
-
-            var columns = new List<string>(reader.FieldCount);
-            for (var i = 0; i < reader.FieldCount; i++)
-                columns.Add(reader.GetName(i));
-
-            var widths = columns.Select(c => Math.Max(c.Length, 4)).ToArray();
-            var rowCount = 0;
-            var rows = new List<string[]>();
-
-            while (await reader.ReadAsync(ct))
-            {
-                if (maxRows.HasValue && rows.Count >= maxRows.Value)
-                {
-                    rowCount++;
-                    continue;
-                }
-
-                var values = new string[reader.FieldCount];
-                for (var i = 0; i < reader.FieldCount; i++)
-                {
-                    values[i] = reader.IsDBNull(i) ? "NULL" : reader.GetValue(i)?.ToString() ?? "";
-                    if (values[i].Length > 100)
-                        values[i] = values[i][..100] + "...";
-                    if (values[i].Length > widths[i])
-                        widths[i] = Math.Min(values[i].Length, 100);
-                }
-                rows.Add(values);
-                rowCount++;
-            }
-
-            // Build result table
-            var separator = "+";
-            foreach (var w in widths) separator += new string('-', w + 2) + "+";
-
-            sb.AppendLine(separator);
-            sb.Append("|");
-            for (var i = 0; i < columns.Count; i++)
-                sb.Append($" {columns[i].PadRight(widths[i])} |");
-            sb.AppendLine();
-
-            sb.AppendLine(separator);
-
-            foreach (var row in rows)
-            {
-                sb.Append("|");
-                for (var i = 0; i < row.Length; i++)
-                    sb.Append($" {row[i].PadRight(widths[i])} |");
-                sb.AppendLine();
-            }
-
-            sb.AppendLine(separator);
-            sb.AppendLine($"({rowCount} row(s))");
-        }
-
-        return sb.ToString();
     }
 
     public async Task<string> GetTableSample(string schema, string table, int limit, CancellationToken ct)
     {
-        return await ExecuteQuery(
-            $"SELECT * FROM {QuoteIdentifier(schema)}.{QuoteIdentifier(table)} LIMIT {limit}",
-            limit, ct);
+        await using var conn = await _dataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand(
+            $"SELECT * FROM {QuoteIdentifier(schema)}.{QuoteIdentifier(table)} LIMIT @limit", conn);
+        cmd.Parameters.AddWithValue("limit", limit);
+
+        var sb = await FormatResults(cmd, limit, ct);
+        return sb.Length > 0 ? sb.ToString() : "(no results)";
+    }
+
+    private async Task<StringBuilder> FormatResults(NpgsqlCommand cmd, int? maxRows, CancellationToken ct)
+    {
+        await using var reader = await cmd.ExecuteReaderAsync(CommandBehavior.Default, ct);
+        var sb = new StringBuilder();
+
+        if (!reader.HasRows && reader.FieldCount == 0)
+        {
+            sb.Append("(query executed successfully, no results returned)");
+            return sb;
+        }
+
+        var columns = new List<string>(reader.FieldCount);
+        for (var i = 0; i < reader.FieldCount; i++)
+            columns.Add(reader.GetName(i));
+
+        var widths = columns.Select(c => Math.Max(c.Length, 4)).ToArray();
+        var rowCount = 0;
+        var rows = new List<string[]>();
+
+        while (await reader.ReadAsync(ct))
+        {
+            if (maxRows.HasValue && rows.Count >= maxRows.Value)
+            {
+                rowCount++;
+                continue;
+            }
+
+            var values = new string[reader.FieldCount];
+            for (var i = 0; i < reader.FieldCount; i++)
+            {
+                values[i] = reader.IsDBNull(i) ? "NULL" : reader.GetValue(i)?.ToString() ?? "";
+                if (values[i].Length > 100)
+                    values[i] = values[i][..100] + "...";
+                if (values[i].Length > widths[i])
+                    widths[i] = Math.Min(values[i].Length, 100);
+            }
+            rows.Add(values);
+            rowCount++;
+        }
+
+        var separator = "+";
+        foreach (var w in widths) separator += new string('-', w + 2) + "+";
+
+        sb.AppendLine(separator);
+        sb.Append("|");
+        for (var i = 0; i < columns.Count; i++)
+            sb.Append($" {columns[i].PadRight(widths[i])} |");
+        sb.AppendLine();
+        sb.AppendLine(separator);
+
+        foreach (var row in rows)
+        {
+            sb.Append("|");
+            for (var i = 0; i < row.Length; i++)
+                sb.Append($" {row[i].PadRight(widths[i])} |");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine(separator);
+        sb.AppendLine($"({rowCount} row(s))");
+
+        return sb;
     }
 
     private static string FormatTypeName(string udtName, int? charLength, int? numPrecision, int? numScale)
