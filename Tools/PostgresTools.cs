@@ -43,7 +43,7 @@ public class PostgresTools
         CancellationToken ct = default)
         => await db.GetTableColumns(schema, table, ct);
 
-    [McpServerTool, Description("Generates the full DDL (CREATE TABLE) for a table including columns, PKs, FKs, constraints, comments and indexes.")]
+    [McpServerTool, Description("Generates the full DDL (CREATE TABLE) for a table including columns (with identity, generated, defaults), PKs, FKs, unique, check constraints, comments and indexes.")]
     public async Task<string> GetTableDdl(
         PostgresService db,
         [Description("Schema name")] string schema,

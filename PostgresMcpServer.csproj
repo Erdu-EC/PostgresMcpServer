@@ -25,7 +25,7 @@
         <!-- Set recommended package metadata -->
         <PackageReadmeFile>README.md</PackageReadmeFile>
         <PackageId>Erdu-EC.PostgresMcpServer</PackageId>
-        <PackageVersion>1.0.0</PackageVersion>
+        <PackageVersion>1.0.1</PackageVersion>
         <PackageTags>AI; MCP; server; stdio</PackageTags>
         <Description>An MCP server for Postgres SQL.</Description>
     </PropertyGroup>

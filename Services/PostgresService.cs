@@ -184,11 +184,98 @@ public sealed class PostgresService : IDisposable
 
         var columnDefs = new List<string>();
 
+        // Build FK lookup: map column -> FK info for single-column FKs
+        var colFkLookup = new Dictionary<string, (string conName, string fSchema, string fTable, string fCol)>(StringComparer.OrdinalIgnoreCase);
+        var multiColumnFkGroups = new Dictionary<string, (List<string> cols, string fSchema, string fTable, List<string> fCols)>();
+
+        await using (var fkCmd = new NpgsqlCommand("""
+            SELECT c.conname AS constraint_name,
+                   a.attname AS column_name,
+                   nsp.nspname AS foreign_schema,
+                   rel.relname AS foreign_table,
+                   fa.attname AS foreign_column,
+                   u.ord AS position
+            FROM pg_catalog.pg_constraint c
+            CROSS JOIN LATERAL unnest(c.conkey, c.confkey) WITH ORDINALITY AS u(conkey, confkey, ord)
+            JOIN pg_catalog.pg_attribute a
+              ON a.attrelid = c.conrelid AND a.attnum = u.conkey
+            JOIN pg_catalog.pg_class rel ON rel.oid = c.confrelid
+            JOIN pg_catalog.pg_namespace nsp ON nsp.oid = rel.relnamespace
+            JOIN pg_catalog.pg_attribute fa
+              ON fa.attrelid = c.confrelid AND fa.attnum = u.confkey
+            WHERE c.conrelid = (quote_ident(@schema) || '.' || quote_ident(@table))::regclass
+              AND c.contype = 'f'
+            ORDER BY c.conname, u.ord
+            """, conn))
+        {
+            fkCmd.Parameters.AddWithValue("schema", schema);
+            fkCmd.Parameters.AddWithValue("table", table);
+
+            await using var reader = await fkCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var fkName = reader.GetString(0);
+                var col = reader.GetString(1);
+                var fSchema = reader.GetString(2);
+                var fTable = reader.GetString(3);
+                var fCol = reader.GetString(4);
+
+                if (!multiColumnFkGroups.ContainsKey(fkName))
+                    multiColumnFkGroups[fkName] = (new List<string>(), fSchema, fTable, new List<string>());
+
+                multiColumnFkGroups[fkName].cols.Add(col);
+                multiColumnFkGroups[fkName].fCols.Add(fCol);
+            }
+        }
+
+        // Separate single vs multi-column FKs; single go inline
+        var singleColFkNames = new HashSet<string>();
+        foreach (var (name, (cols, _, _, _)) in multiColumnFkGroups)
+        {
+            if (cols.Count == 1)
+                singleColFkNames.Add(name);
+        }
+
+        foreach (var (name, (cols, fSchema, fTable, fCols)) in multiColumnFkGroups)
+        {
+            if (singleColFkNames.Contains(name))
+                colFkLookup[cols[0]] = (name, fSchema, fTable, fCols[0]);
+        }
+
+        // Build PK lookup: single-column PKs go inline
+        var pkColNames = new List<string>();
+        var pkConName = "";
+        await using (var pkCmd = new NpgsqlCommand("""
+            SELECT c.conname AS constraint_name, a.attname AS column_name
+            FROM pg_catalog.pg_constraint c
+            CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS u(attnum, ord)
+            JOIN pg_catalog.pg_attribute a
+              ON a.attrelid = c.conrelid AND a.attnum = u.attnum
+            WHERE c.conrelid = (quote_ident(@schema) || '.' || quote_ident(@table))::regclass
+              AND c.contype = 'p'
+            ORDER BY u.ord
+            """, conn))
+        {
+            pkCmd.Parameters.AddWithValue("schema", schema);
+            pkCmd.Parameters.AddWithValue("table", table);
+
+            await using var reader = await pkCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                pkConName = reader.GetString(0);
+                pkColNames.Add(reader.GetString(1));
+            }
+        }
+
+        var singleColPk = pkColNames.Count == 1 ? pkColNames[0] : null;
+
         // Columns
         await using (var cmd = new NpgsqlCommand("""
             SELECT column_name, udt_name, character_maximum_length,
                    numeric_precision, numeric_scale, is_nullable,
-                   column_default, ordinal_position
+                   column_default, ordinal_position,
+                   is_identity, identity_generation,
+                   is_generated, generation_expression
             FROM information_schema.columns
             WHERE table_schema = @schema AND table_name = @table
             ORDER BY ordinal_position
@@ -203,7 +290,8 @@ public sealed class PostgresService : IDisposable
 
             while (await reader.ReadAsync(ct))
             {
-                var colDef = $"  {QuoteIdentifier(reader.GetString(0))} {FormatTypeName(
+                var colName = reader.GetString(0);
+                var colDef = $"  {QuoteIdentifier(colName)} {FormatTypeName(
                     reader.GetString(1),
                     reader.IsDBNull(2) ? null : reader.GetInt32(2),
                     reader.IsDBNull(3) ? null : reader.GetInt32(3),
@@ -213,99 +301,65 @@ public sealed class PostgresService : IDisposable
                 if (reader.GetString(5) == "NO")
                     colDef += " NOT NULL";
 
-                if (!reader.IsDBNull(6))
+                var isIdentity = reader.IsDBNull(8) ? "NO" : reader.GetString(8);
+                var identityGeneration = reader.IsDBNull(9) ? "" : reader.GetString(9);
+                var isGenerated = reader.IsDBNull(10) ? "NEVER" : reader.GetString(10);
+                var generationExpression = reader.IsDBNull(11) ? "" : reader.GetString(11);
+
+                if (isIdentity == "YES")
+                {
+                    colDef += $" GENERATED {identityGeneration} AS IDENTITY";
+                }
+                else if (isGenerated == "ALWAYS")
+                {
+                    colDef += $" GENERATED ALWAYS AS ({generationExpression}) STORED";
+                }
+                else if (!reader.IsDBNull(6))
                 {
                     var def = reader.GetString(6);
                     if (!def.StartsWith("nextval("))
                         colDef += $" DEFAULT {def}";
                 }
 
+                // Inline REFERENCES for single-column FKs
+                if (colFkLookup.TryGetValue(colName, out var fkInfo))
+                {
+                    colDef += $" CONSTRAINT {QuoteIdentifier(fkInfo.conName)} REFERENCES {QuoteIdentifier(fkInfo.fSchema)}.{QuoteIdentifier(fkInfo.fTable)}";
+                    if (!string.Equals(colName, fkInfo.fCol, StringComparison.OrdinalIgnoreCase))
+                        colDef += $" ({QuoteIdentifier(fkInfo.fCol)})";
+                }
+
+                // Inline PRIMARY KEY for single-column PKs
+                if (string.Equals(colName, singleColPk, StringComparison.OrdinalIgnoreCase))
+                    colDef += $" CONSTRAINT {QuoteIdentifier(pkConName)} PRIMARY KEY";
+
                 columnDefs.Add(colDef);
             }
         }
 
-        // Primary key
-        await using (var cmd = new NpgsqlCommand("""
-            SELECT kcu.column_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-            WHERE tc.table_schema = @schema
-              AND tc.table_name = @table
-              AND tc.constraint_type = 'PRIMARY KEY'
-            ORDER BY kcu.ordinal_position
-            """, conn))
+        // Primary key (multi-column only; single-column is inlined above)
+        if (pkColNames.Count > 1)
+            columnDefs.Add($"  CONSTRAINT {QuoteIdentifier(pkConName)} PRIMARY KEY ({string.Join(", ", pkColNames.Select(QuoteIdentifier))})");
+
+        // Foreign keys (multi-column only; single-column are inlined above)
+        foreach (var (name, (cols, fSchema, fTable, fCols)) in multiColumnFkGroups)
         {
-            cmd.Parameters.AddWithValue("schema", schema);
-            cmd.Parameters.AddWithValue("table", table);
+            if (singleColFkNames.Contains(name))
+                continue;
 
-            var pkCols = new List<string>();
-            await using var reader = await cmd.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-                pkCols.Add(QuoteIdentifier(reader.GetString(0)));
-
-            if (pkCols.Count > 0)
-                columnDefs.Add($"  PRIMARY KEY ({string.Join(", ", pkCols)})");
-        }
-
-        // Foreign keys
-        await using (var cmd = new NpgsqlCommand("""
-            SELECT tc.constraint_name,
-                   kcu.column_name,
-                   ccu.table_schema AS foreign_schema,
-                   ccu.table_name AS foreign_table,
-                   ccu.column_name AS foreign_column
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-            JOIN information_schema.constraint_column_usage ccu
-              ON tc.constraint_name = ccu.constraint_name
-              AND ccu.table_schema = tc.table_schema
-            WHERE tc.table_schema = @schema
-              AND tc.table_name = @table
-              AND tc.constraint_type = 'FOREIGN KEY'
-            ORDER BY tc.constraint_name, kcu.ordinal_position
-            """, conn))
-        {
-            cmd.Parameters.AddWithValue("schema", schema);
-            cmd.Parameters.AddWithValue("table", table);
-
-            var fkGroups = new Dictionary<string, (List<string> cols, string fSchema, string fTable, List<string> fCols)>();
-            await using var reader = await cmd.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                var fkName = reader.GetString(0);
-                var col = reader.GetString(1);
-                var fSchema = reader.GetString(2);
-                var fTable = reader.GetString(3);
-                var fCol = reader.GetString(4);
-
-                if (!fkGroups.ContainsKey(fkName))
-                    fkGroups[fkName] = (new List<string>(), fSchema, fTable, new List<string>());
-
-                fkGroups[fkName].cols.Add(QuoteIdentifier(col));
-                fkGroups[fkName].fCols.Add(QuoteIdentifier(fCol));
-            }
-
-            foreach (var (name, (cols, fSchema, fTable, fCols)) in fkGroups)
-            {
-                columnDefs.Add($"  FOREIGN KEY ({string.Join(", ", cols)}) REFERENCES {QuoteIdentifier(fSchema)}.{QuoteIdentifier(fTable)} ({string.Join(", ", fCols)})");
-            }
+            columnDefs.Add($"  CONSTRAINT {QuoteIdentifier(name)} FOREIGN KEY ({string.Join(", ", cols.Select(QuoteIdentifier))}) REFERENCES {QuoteIdentifier(fSchema)}.{QuoteIdentifier(fTable)} ({string.Join(", ", fCols.Select(QuoteIdentifier))})");
         }
 
         // Unique constraints
         await using (var cmd = new NpgsqlCommand("""
-            SELECT tc.constraint_name, kcu.column_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-            WHERE tc.table_schema = @schema
-              AND tc.table_name = @table
-              AND tc.constraint_type = 'UNIQUE'
-            ORDER BY tc.constraint_name, kcu.ordinal_position
+            SELECT c.conname AS constraint_name, a.attname AS column_name
+            FROM pg_catalog.pg_constraint c
+            CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS u(attnum, ord)
+            JOIN pg_catalog.pg_attribute a
+              ON a.attrelid = c.conrelid AND a.attnum = u.attnum
+            WHERE c.conrelid = (quote_ident(@schema) || '.' || quote_ident(@table))::regclass
+              AND c.contype = 'u'
+            ORDER BY c.conname, u.ord
             """, conn))
         {
             cmd.Parameters.AddWithValue("schema", schema);
@@ -322,12 +376,45 @@ public sealed class PostgresService : IDisposable
                 uniqueGroups[name].Add(QuoteIdentifier(col));
             }
 
-            foreach (var (_, cols) in uniqueGroups)
-                columnDefs.Add($"  UNIQUE ({string.Join(", ", cols)})");
+            foreach (var (name, cols) in uniqueGroups)
+                columnDefs.Add($"  CONSTRAINT {QuoteIdentifier(name)} UNIQUE ({string.Join(", ", cols)})");
+        }
+
+        // Check constraints
+        await using (var cmd = new NpgsqlCommand("""
+            SELECT c.conname AS constraint_name, pg_get_constraintdef(c.oid) AS check_def
+            FROM pg_catalog.pg_constraint c
+            WHERE c.conrelid = (quote_ident(@schema) || '.' || quote_ident(@table))::regclass
+              AND c.contype = 'c'
+            ORDER BY c.conname
+            """, conn))
+        {
+            cmd.Parameters.AddWithValue("schema", schema);
+            cmd.Parameters.AddWithValue("table", table);
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                columnDefs.Add($"  CONSTRAINT {QuoteIdentifier(reader.GetString(0))} {reader.GetString(1)}");
         }
 
         sb.AppendLine(string.Join(",\n", columnDefs));
         sb.AppendLine(");");
+
+        // Table comment
+        await using (var cmd = new NpgsqlCommand("""
+            SELECT pg_catalog.obj_description(
+                (quote_ident(@schema) || '.' || quote_ident(@table))::regclass::oid,
+                'pg_class'
+            )
+            """, conn))
+        {
+            cmd.Parameters.AddWithValue("schema", schema);
+            cmd.Parameters.AddWithValue("table", table);
+
+            var tableComment = await cmd.ExecuteScalarAsync(ct);
+            if (tableComment is string comment && !string.IsNullOrEmpty(comment))
+                sb.AppendLine($"COMMENT ON TABLE {QuoteIdentifier(schema)}.{QuoteIdentifier(table)} IS '{comment.Replace("'", "''")}';");
+        }
 
         // Comments
         await using (var cmd = new NpgsqlCommand("""
