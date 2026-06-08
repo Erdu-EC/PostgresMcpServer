@@ -45,16 +45,22 @@ public sealed class PostgresService : IDisposable
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var sb = new StringBuilder();
 
-        await using (var cmd = new NpgsqlCommand("""
-            SELECT table_schema, table_name, pg_size_pretty(pg_total_relation_size(quote_ident(table_schema) || '.' || quote_ident(table_name))) AS size
-            FROM information_schema.tables
-            WHERE table_type = 'BASE TABLE'
-              AND table_schema NOT IN ('pg_catalog', 'information_schema')
-              AND (@schema IS NULL OR table_schema = @schema)
-            ORDER BY table_schema, table_name
-            """, conn))
+        var sql = """
+            SELECT n.nspname AS table_schema,
+                   c.relname AS table_name,
+                   pg_size_pretty(pg_total_relation_size(c.oid)) AS size
+            FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'r'
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            """;
+
+        await using (var cmd = new NpgsqlCommand(sql, conn))
         {
-            cmd.Parameters.AddWithValue("schema", (object?)schema ?? DBNull.Value);
+            if (!string.IsNullOrEmpty(schema))
+                cmd.Parameters.AddWithValue("schema", schema);
+
+            cmd.CommandText += " ORDER BY n.nspname, c.relname";
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
@@ -69,15 +75,18 @@ public sealed class PostgresService : IDisposable
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var sb = new StringBuilder();
 
-        await using (var cmd = new NpgsqlCommand("""
+        var sql = """
             SELECT table_schema, table_name
             FROM information_schema.views
             WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-              AND (@schema IS NULL OR table_schema = @schema)
-            ORDER BY table_schema, table_name
-            """, conn))
+            """;
+
+        await using (var cmd = new NpgsqlCommand(sql, conn))
         {
-            cmd.Parameters.AddWithValue("schema", (object?)schema ?? DBNull.Value);
+            if (!string.IsNullOrEmpty(schema))
+                cmd.Parameters.AddWithValue("schema", schema);
+
+            cmd.CommandText += " ORDER BY table_schema, table_name";
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
@@ -92,7 +101,7 @@ public sealed class PostgresService : IDisposable
         await using var conn = await _dataSource.OpenConnectionAsync(ct);
         var sb = new StringBuilder();
 
-        await using (var cmd = new NpgsqlCommand("""
+        var sql = """
             SELECT n.nspname, p.proname,
                    pg_get_function_arguments(p.oid) AS args,
                    CASE p.prokind
@@ -102,16 +111,19 @@ public sealed class PostgresService : IDisposable
                        ELSE 'OTHER'
                    END AS kind,
                    l.lanname AS language
-            FROM pg_proc p
-            JOIN pg_namespace n ON p.pronamespace = n.oid
-            JOIN pg_language l ON p.prolang = l.oid
+            FROM pg_catalog.pg_proc p
+            JOIN pg_catalog.pg_namespace n ON p.pronamespace = n.oid
+            JOIN pg_catalog.pg_language l ON p.prolang = l.oid
             WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
               AND p.prokind IN ('f', 'p')
-              AND (@schema IS NULL OR n.nspname = @schema)
-            ORDER BY n.nspname, p.proname
-            """, conn))
+            """;
+
+        await using (var cmd = new NpgsqlCommand(sql, conn))
         {
-            cmd.Parameters.AddWithValue("schema", (object?)schema ?? DBNull.Value);
+            if (!string.IsNullOrEmpty(schema))
+                cmd.Parameters.AddWithValue("schema", schema);
+
+            cmd.CommandText += " ORDER BY n.nspname, p.proname";
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
@@ -501,16 +513,20 @@ public sealed class PostgresService : IDisposable
         var sb = new StringBuilder();
 
         await using (var cmd = new NpgsqlCommand("""
-            SELECT tc.table_schema, tc.table_name, kcu.column_name, tc.constraint_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-            WHERE tc.constraint_type = 'PRIMARY KEY'
-              AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
-              AND (@schema IS NULL OR tc.table_schema = @schema)
-              AND (@table IS NULL OR tc.table_name = @table)
-            ORDER BY tc.table_schema, tc.table_name, kcu.ordinal_position
+            SELECT n.nspname AS table_schema,
+                   c.relname AS table_name,
+                   a.attname AS column_name,
+                   con.conname AS constraint_name
+            FROM pg_catalog.pg_constraint con
+            JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS u(attnum, ord)
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = u.attnum
+            WHERE con.contype = 'p'
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND (@schema IS NULL OR n.nspname = @schema)
+              AND (@table IS NULL OR c.relname = @table)
+            ORDER BY n.nspname, c.relname, u.ord
             """, conn))
         {
             cmd.Parameters.AddWithValue("schema", (object?)schema ?? DBNull.Value);
@@ -535,24 +551,26 @@ public sealed class PostgresService : IDisposable
         var sb = new StringBuilder();
 
         await using (var cmd = new NpgsqlCommand("""
-            SELECT
-                tc.table_schema, tc.table_name, kcu.column_name,
-                ccu.table_schema AS foreign_schema,
-                ccu.table_name AS foreign_table,
-                ccu.column_name AS foreign_column,
-                tc.constraint_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_name = kcu.constraint_name
-              AND tc.table_schema = kcu.table_schema
-            JOIN information_schema.constraint_column_usage ccu
-              ON tc.constraint_name = ccu.constraint_name
-              AND ccu.table_schema = tc.table_schema
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
-              AND (@schema IS NULL OR tc.table_schema = @schema)
-              AND (@table IS NULL OR tc.table_name = @table)
-            ORDER BY tc.table_schema, tc.table_name, tc.constraint_name, kcu.ordinal_position
+            SELECT n.nspname AS table_schema,
+                   c.relname AS table_name,
+                   a.attname AS column_name,
+                   fn.nspname AS foreign_schema,
+                   fc.relname AS foreign_table,
+                   fa.attname AS foreign_column,
+                   con.conname AS constraint_name
+            FROM pg_catalog.pg_constraint con
+            JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            CROSS JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS u(conkey, confkey, ord)
+            JOIN pg_catalog.pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = u.conkey
+            JOIN pg_catalog.pg_class fc ON fc.oid = con.confrelid
+            JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
+            JOIN pg_catalog.pg_attribute fa ON fa.attrelid = con.confrelid AND fa.attnum = u.confkey
+            WHERE con.contype = 'f'
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND (@schema IS NULL OR n.nspname = @schema)
+              AND (@table IS NULL OR c.relname = @table)
+            ORDER BY n.nspname, c.relname, con.conname, u.ord
             """, conn))
         {
             cmd.Parameters.AddWithValue("schema", (object?)schema ?? DBNull.Value);
