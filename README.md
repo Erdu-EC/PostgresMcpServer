@@ -1,36 +1,38 @@
 # PostgresMcpServer
 
-MCP server para interactuar con bases de datos PostgreSQL. Proporciona herramientas para explorar esquemas, tablas, vistas, procedimientos almacenados, obtener DDL, ejecutar consultas y mas.
+MCP server para que tu agente de IA interactue con bases de datos PostgreSQL. Expone dos herramientas: una para consultas de lectura y otra para ejecutar sentencias de escritura/DDL.
+
+## Requisitos
+
+- [.NET 10 Runtime](https://dotnet.microsoft.com/) (o superior)
+- Una base de datos PostgreSQL accesible
 
 ## Configuracion
 
-Establece la variable de entorno `PGCONNECTIONSTRING` con la cadena de conexión a tu base de datos:
+Define la variable de entorno `PGCONNECTIONSTRING` con tu cadena de conexion:
 
-```powershell
-$env:PGCONNECTIONSTRING = "Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass"
 ```
+Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass
+```
+
+> **Nota de seguridad:** usa un usuario con los minimos permisos necesarios. La herramienta `execute` puede modificar o eliminar datos y esquemas.
 
 ## Herramientas
 
 | Tool | Descripcion |
 |------|-------------|
-| `get_schemas` | Lista todos los esquemas no del sistema |
-| `get_tables` | Lista tablas (filtro opcional por esquema) |
-| `get_views` | Lista vistas (filtro opcional por esquema) |
-| `get_functions` | Lista funciones y procedimientos almacenados (filtro opcional por esquema) |
-| `get_table_columns` | Informacion detallada de columnas (nombre, tipo, nullable, default, descripcion) |
-| `get_table_ddl` | Genera el DDL completo (CREATE TABLE con columnas, PKs, FKs, constraints, indices, comentarios) |
-| `get_view_definition` | Obtiene la definicion (SELECT) de una vista |
-| `get_function_source` | Obtiene el codigo fuente de una funcion o procedimiento |
-| `get_primary_keys` | Lista llaves primarias (filtro opcional por esquema o tabla) |
-| `get_foreign_keys` | Lista llaves foraneas con tablas referenciadas (filtro opcional) |
-| `get_indexes` | Lista indices con su definicion (filtro opcional) |
-| `execute_query` | Ejecuta consultas SELECT y devuelve resultados formateados en tabla |
-| `get_table_sample` | Obtiene una muestra de datos de una tabla (SELECT * con LIMIT) |
+| `query` | Ejecuta una consulta SQL de lectura (SELECT). Corre en una transaccion `READ ONLY` por seguridad. Acepta `maxRows` (por defecto 100) para limitar las filas devueltas. |
+| `execute` | Ejecuta una sentencia SQL que modifica datos o esquema (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, TRUNCATE, etc.). Devuelve el numero de filas afectadas. **Puede causar cambios irreversibles.** |
 
-## Uso con opencode
+Los resultados se devuelven como JSON. Si `query` trunca el resultado por `maxRows`, lo indica con un campo `truncated` y una nota para refinar la consulta.
 
-Agrega la siguiente configuracion a tu `opencode.jsonc`:
+Con `query` puedes explorar el esquema usando `information_schema` y `pg_catalog`: listar tablas, ver columnas, definiciones de vistas, funciones, indices, constraints, etc.
+
+## Registro en tu cliente MCP
+
+### opencode
+
+Agrega esto a tu `opencode.jsonc`:
 
 ```jsonc
 {
@@ -38,22 +40,47 @@ Agrega la siguiente configuracion a tu `opencode.jsonc`:
   "mcp": {
     "PostgresMcpServer": {
       "type": "local",
-      "command": ["dotnet", "run", "--project", "E:\\ruta\\al\\proyecto\\PostgresMcpServer"]
+      "command": ["dotnet", "run", "--project", "E:\\ruta\\al\\proyecto\\PostgresMcpServer"],
+      "environment": {
+        "PGCONNECTIONSTRING": "Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass"
+      }
     }
   }
 }
 ```
 
-## Desarrollo local
+### Claude Desktop
+
+Agrega esto a tu archivo de configuracion (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "PostgresMcpServer": {
+      "command": "dotnet",
+      "args": ["run", "--project", "E:\\ruta\\al\\proyecto\\PostgresMcpServer"],
+      "env": {
+        "PGCONNECTIONSTRING": "Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass"
+      }
+    }
+  }
+}
+```
+
+### Ejecutar desde el codigo fuente
 
 ```bash
 dotnet run --project PostgresMcpServer.csproj
 ```
 
-El servidor usa transporte stdio y se comunica mediante el protocolo MCP.
+El server se comunica por transporte stdio mediante el protocolo MCP.
 
 ## Tecnologias
 
 - [.NET 10](https://dotnet.microsoft.com/)
 - [ModelContextProtocol C# SDK](https://www.nuget.org/packages/ModelContextProtocol)
 - [Npgsql](https://www.npgsql.org/)
+
+## Licencia
+
+[MIT](LICENSE)
