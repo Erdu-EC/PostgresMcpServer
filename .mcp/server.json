@@ -1,22 +1,27 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
-  "description": "An MCP server for Postgres SQL.",
-  "name": "io.github.Erdu-EC/PostgresMcpServer",
-  "version": "1.0.1",
+  "description": "MCP server for PostgreSQL with query and execute tools, fully Native AOT compatible.",
+  "name": "postgres-mcp",
+  "version": "1.0.0",
   "packages": [
     {
       "registryType": "nuget",
       "identifier": "PostgresMcpServer",
-      "version": "1.0.1",
+      "version": "1.0.0",
       "transport": {
         "type": "stdio"
       },
       "packageArguments": [],
-      "environmentVariables": []
+      "environmentVariables": [
+        {
+          "name": "PGCONNECTIONSTRING",
+          "description": "PostgreSQL connection string (e.g. Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass;)"
+        }
+      ]
     }
   ],
   "repository": {
-    "url": "https://github.com/Erdu-EC/PostgresMcpServer",
+    "url": "https://github.com/user/PostgresMcpServer",
     "source": "github"
   }
 }

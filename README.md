@@ -1,86 +1,155 @@
-# PostgresMcpServer
+# PostgreSQL MCP Server
 
-MCP server para que tu agente de IA interactue con bases de datos PostgreSQL. Expone dos herramientas: una para consultas de lectura y otra para ejecutar sentencias de escritura/DDL.
+Connect your AI application to PostgreSQL using the Model Context Protocol (MCP). This server provides two tools to interact with your database: execute queries and modify data.
 
-## Requisitos
+## Installation
 
-- [.NET 10 Runtime](https://dotnet.microsoft.com/) (o superior)
-- Una base de datos PostgreSQL accesible
+### Option 1: Direct download (recommended)
 
-## Configuracion
+1. Download the binary for your platform from [Releases](https://github.com/user/PostgresMcpServer/releases)
+2. Extract the zip file
+3. Ensure the executable has execute permissions (Linux): `chmod +x PostgresMcpServer`
 
-Define la variable de entorno `PGCONNECTIONSTRING` con tu cadena de conexion:
-
-```
-Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass
-```
-
-> **Nota de seguridad:** usa un usuario con los minimos permisos necesarios. La herramienta `execute` puede modificar o eliminar datos y esquemas.
-
-## Herramientas
-
-| Tool | Descripcion |
-|------|-------------|
-| `query` | Ejecuta una consulta SQL de lectura (SELECT). Corre en una transaccion `READ ONLY` por seguridad. Acepta `maxRows` (por defecto 100) para limitar las filas devueltas. |
-| `execute` | Ejecuta una sentencia SQL que modifica datos o esquema (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, TRUNCATE, etc.). Devuelve el numero de filas afectadas. **Puede causar cambios irreversibles.** |
-
-Los resultados se devuelven como JSON. Si `query` trunca el resultado por `maxRows`, lo indica con un campo `truncated` y una nota para refinar la consulta.
-
-Con `query` puedes explorar el esquema usando `information_schema` y `pg_catalog`: listar tablas, ver columnas, definiciones de vistas, funciones, indices, constraints, etc.
-
-## Registro en tu cliente MCP
-
-### opencode
-
-Agrega esto a tu `opencode.jsonc`:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "PostgresMcpServer": {
-      "type": "local",
-      "command": ["dotnet", "run", "--project", "E:\\ruta\\al\\proyecto\\PostgresMcpServer"],
-      "environment": {
-        "PGCONNECTIONSTRING": "Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass"
-      }
-    }
-  }
-}
-```
-
-### Claude Desktop
-
-Agrega esto a tu archivo de configuracion (`claude_desktop_config.json`):
+### Option 2: NuGet
 
 ```json
 {
-  "mcpServers": {
-    "PostgresMcpServer": {
-      "command": "dotnet",
-      "args": ["run", "--project", "E:\\ruta\\al\\proyecto\\PostgresMcpServer"],
+  "servers": {
+    "postgres": {
+      "type": "stdio",
+      "command": "dnx",
+      "args": ["PostgresMcpServer", "--yes"],
       "env": {
-        "PGCONNECTIONSTRING": "Host=localhost;Port=5432;Database=mydb;Username=user;Password=pass"
+        "PGCONNECTIONSTRING": "Host=...;Port=5432;Database=...;Username=...;Password=..."
       }
     }
   }
 }
 ```
 
-### Ejecutar desde el codigo fuente
+## Configuration
 
-```bash
-dotnet run --project PostgresMcpServer.csproj
+### Database connection
+
+Set the `PGCONNECTIONSTRING` environment variable with your connection string:
+
+```
+PGCONNECTIONSTRING="Host=myserver;Port=5432;Database=mydb;Username=myuser;Password=mypassword;"
 ```
 
-El server se comunica por transporte stdio mediante el protocolo MCP.
+### MCP client configuration
 
-## Tecnologias
+#### With downloaded binary
 
-- [.NET 10](https://dotnet.microsoft.com/)
-- [ModelContextProtocol C# SDK](https://www.nuget.org/packages/ModelContextProtocol)
-- [Npgsql](https://www.npgsql.org/)
+```json
+{
+  "servers": {
+    "postgres": {
+      "type": "stdio",
+      "command": "./PostgresMcpServer",
+      "args": [],
+      "env": {
+        "PGCONNECTIONSTRING": "Host=...;Port=5432;Database=...;Username=...;Password=..."
+      }
+    }
+  }
+}
+```
 
-## Licencia
+#### On Windows
 
-[MIT](LICENSE)
+```json
+{
+  "servers": {
+    "postgres": {
+      "type": "stdio",
+      "command": ".\\PostgresMcpServer.exe",
+      "args": [],
+      "env": {
+        "PGCONNECTIONSTRING": "Host=...;Port=5432;Database=...;Username=...;Password=..."
+      }
+    }
+  }
+}
+```
+
+## Available tools
+
+### `query` — Read queries
+
+Execute SELECT statements and return results as JSON.
+
+**Parameters:**
+- `query` (string): The SQL SELECT statement to execute
+- `maxRows` (integer, optional): Maximum number of rows to return. Default: **100**. Use this to prevent returning millions of rows accidentally.
+
+**Example:**
+```sql
+SELECT tablename FROM pg_tables WHERE schemaname = 'public' LIMIT 10
+```
+
+**Response:**
+```json
+[
+  {"tablename": "users"},
+  {"tablename": "orders"}
+]
+```
+
+### `execute` — Data modification
+
+Execute commands that modify data or structure (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP).
+
+**Parameter:**
+- `query` (string): The SQL statement to execute
+
+**Example:**
+```sql
+INSERT INTO users (name, email) VALUES ('Juan', 'juan@ejemplo.com')
+```
+
+**Response:**
+```
+Rows affected: 1
+```
+
+## Supported data types
+
+The server automatically converts PostgreSQL types to JSON:
+
+| PostgreSQL | JSON |
+|---|---|
+| `INT`, `BIGINT`, `SMALLINT` | Number |
+| `FLOAT`, `NUMERIC`, `MONEY` | Number |
+| `VARCHAR`, `TEXT`, `CHAR` | String |
+| `BOOLEAN` | Boolean |
+| `TIMESTAMP`, `DATE` | ISO 8601 string |
+| `BYTEA` | Base64 |
+| `UUID` | String |
+| `INTERVAL` | ISO 8601 duration |
+| `NULL` | `null` |
+
+## Troubleshooting
+
+### Connection error
+- Verify that `PGCONNECTIONSTRING` is configured correctly
+- Ensure the PostgreSQL server is accessible from where you run the MCP server
+- For SSL connections, add `SSL Mode=Require;` to the connection string
+
+### Long query timeout
+- Queries have a default timeout of 30 seconds
+- For longer queries, optimize your query or add indexes
+
+### Authentication error
+- Verify username and password in the connection string
+- Ensure the PostgreSQL user has the required permissions for the database
+
+## Supported platforms
+
+- Windows x64
+- Linux x64
+- Linux x64 (musl, statically compiled)
+
+## More information
+
+- [Official MCP Documentation](https://modelcontextprotocol.io/)
